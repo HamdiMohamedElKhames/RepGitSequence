@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import math
-import random
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import warnings
+import requests
+from datetime import datetime
+
 warnings.filterwarnings('ignore')
 
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -25,7 +26,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better appearance
 st.markdown("""
     <style>
     .main-header {
@@ -52,13 +52,89 @@ st.markdown("""
         text-align: center;
         color: white;
     }
+    .weather-card {
+        background: linear-gradient(135deg, #00b4db 0%, #0083b0 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        text-align: center;
+        color: white;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# Set seaborn style
 sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (10, 6)
 plt.rcParams['font.size'] = 10
+
+# -----------------------------
+# WEATHER API
+# -----------------------------
+WEATHER_API_KEY = "ac1eaef100d35f9bd7daea57ee033d10"
+
+@st.cache_data(ttl=3600)
+def get_current_weather(city="London", api_key=None):
+    if not api_key:
+        return None
+    
+    try:
+        base_url = "http://api.openweathermap.org/data/2.5/weather"
+        params = {
+            'q': city,
+            'appid': api_key,
+            'units': 'metric'
+        }
+        response = requests.get(base_url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            weather_data = {
+                'city': data['name'],
+                'temperature': data['main']['temp'],
+                'humidity': data['main']['humidity'],
+                'pressure': data['main']['pressure'],
+                'weather_main': data['weather'][0]['main'],
+                'weather_description': data['weather'][0]['description'],
+                'wind_speed': data['wind']['speed'],
+                'clouds': data['clouds']['all'],
+                'timestamp': datetime.now()
+            }
+            return weather_data
+        else:
+            st.warning(f"Weather API error: {response.status_code}")
+            return None
+    except Exception as e:
+        st.warning(f"Could not fetch weather data: {str(e)}")
+        return None
+
+@st.cache_data(ttl=3600)
+def get_weather_forecast(city="London", api_key=None):
+    if not api_key:
+        return None
+    
+    try:
+        base_url = "http://api.openweathermap.org/data/2.5/forecast"
+        params = {
+            'q': city,
+            'appid': api_key,
+            'units': 'metric'
+        }
+        response = requests.get(base_url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            forecast_data = []
+            for item in data['list'][:8]:
+                forecast_data.append({
+                    'datetime': pd.to_datetime(item['dt_txt']),
+                    'temperature': item['main']['temp'],
+                    'humidity': item['main']['humidity'],
+                    'weather': item['weather'][0]['main']
+                })
+            return pd.DataFrame(forecast_data)
+        return None
+    except Exception as e:
+        st.warning(f"Could not fetch forecast: {str(e)}")
+        return None
 
 # -----------------------------
 # LOAD DATA
@@ -70,7 +146,6 @@ def load_data():
     
     df['Timestamp'] = pd.to_datetime(df['Timestamp'])
     
-    # Extract time features
     df['Hour'] = df['Timestamp'].dt.hour
     df['Day'] = df['Timestamp'].dt.day
     df['Month'] = df['Timestamp'].dt.month
@@ -78,7 +153,6 @@ def load_data():
     df['DayOfWeekNum'] = df['Timestamp'].dt.dayofweek
     df['Weekend'] = (df['DayOfWeekNum'] >= 5).astype(int)
     
-    # Time of day categories
     df['TimeOfDay'] = pd.cut(df['Hour'], 
                               bins=[0, 6, 12, 18, 24], 
                               labels=['Night', 'Morning', 'Afternoon', 'Evening'],
@@ -94,7 +168,12 @@ df = load_data()
 st.sidebar.markdown("# ⚡ Dashboard Controls")
 st.sidebar.markdown("---")
 
-# Date range filter
+st.sidebar.markdown("### 🌤️ Weather Settings")
+weather_city = st.sidebar.text_input("City for Weather Data", value="New York")
+use_weather_api = st.sidebar.checkbox("Enable Real-time Weather API", value=True)
+
+st.sidebar.markdown("---")
+
 min_date = df['Timestamp'].min().date()
 max_date = df['Timestamp'].max().date()
 selected_date_range = st.sidebar.date_input(
@@ -111,30 +190,25 @@ if len(selected_date_range) == 2:
 else:
     df_filtered = df.copy()
 
-# Month filter
 selected_month = st.sidebar.multiselect(
     "Select Month",
     options=sorted(df["Month"].unique()),
     default=sorted(df["Month"].unique())
 )
 
-# Hour range filter
 selected_hour = st.sidebar.slider("Hour Range", 0, 23, (0, 23))
 
-# Day filter
 selected_day = st.sidebar.multiselect(
     "Select Day of Week",
     options=sorted(df["DayOfWeek"].unique()),
     default=sorted(df["DayOfWeek"].unique())
 )
 
-# Holiday filter
 holiday_filter = st.sidebar.radio(
     "Holiday Status",
     ["All", "Holiday Only", "Non-Holiday Only"]
 )
 
-# Apply filters
 df_filtered = df_filtered[
     (df_filtered["Month"].isin(selected_month)) &
     (df_filtered["Hour"].between(selected_hour[0], selected_hour[1])) &
@@ -146,6 +220,13 @@ if holiday_filter == "Holiday Only":
 elif holiday_filter == "Non-Holiday Only":
     df_filtered = df_filtered[df_filtered["Holiday"] == "No"]
 
+current_weather = None
+weather_forecast = None
+
+if use_weather_api and WEATHER_API_KEY:
+    current_weather = get_current_weather(weather_city, WEATHER_API_KEY)
+    weather_forecast = get_weather_forecast(weather_city, WEATHER_API_KEY)
+
 # -----------------------------
 # MAIN HEADER
 # -----------------------------
@@ -156,7 +237,38 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# Key Metrics
+if current_weather:
+    st.markdown("### 🌤️ Real-time Weather Update")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.markdown('<div class="weather-card">', unsafe_allow_html=True)
+        st.metric("🌡️ Temperature", f"{current_weather['temperature']:.1f}°C")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="weather-card">', unsafe_allow_html=True)
+        st.metric("💧 Humidity", f"{current_weather['humidity']}%")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown('<div class="weather-card">', unsafe_allow_html=True)
+        st.metric("🌬️ Wind Speed", f"{current_weather['wind_speed']:.1f} m/s")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown('<div class="weather-card">', unsafe_allow_html=True)
+        st.metric("☁️ Clouds", f"{current_weather['clouds']}%")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col5:
+        st.markdown('<div class="weather-card">', unsafe_allow_html=True)
+        st.metric("🌍 City", current_weather['city'])
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.caption(f"📍 {current_weather['weather_description'].capitalize()} | Updated: {current_weather['timestamp'].strftime('%H:%M:%S')}")
+    st.markdown("---")
+
 st.markdown("### 📊 Key Performance Indicators")
 col1, col2, col3, col4, col5 = st.columns(5)
 
@@ -195,7 +307,7 @@ st.markdown("---")
 # -----------------------------
 # NAVIGATION TABS
 # -----------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["📁 Data Explorer", "📊 Visualizations", "🤖 Prediction Model", "📈 Insights"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📁 Data Explorer", "📊 Visualizations", "🤖 Prediction Model", "📈 Insights", "🌤️ Weather Integration"])
 
 # -----------------------------
 # TAB 1: DATA EXPLORER
@@ -226,7 +338,6 @@ with tab1:
 with tab2:
     st.subheader("📊 Interactive Visualizations")
     
-    # Visualization type selector
     viz_type = st.selectbox(
         "Select Visualization Type",
         ["Distribution Analysis", "Time Series Analysis", "Correlation Analysis", "Comparative Analysis"]
@@ -259,7 +370,7 @@ with tab2:
         col1, col2 = st.columns(2)
         
         with col1:
-            st.write("#### Violin Plot: Weekday vs Weekend")
+            st.write("#### Weekday vs Weekend")
             fig, ax = plt.subplots()
             data_to_plot = [df_filtered[df_filtered['Weekend'] == 0]['EnergyConsumption'],
                            df_filtered[df_filtered['Weekend'] == 1]['EnergyConsumption']]
@@ -272,7 +383,7 @@ with tab2:
             plt.close()
         
         with col2:
-            st.write("#### Distribution by Time of Day")
+            st.write("#### Time of Day")
             fig, ax = plt.subplots()
             order = ['Night', 'Morning', 'Afternoon', 'Evening']
             sns.boxplot(data=df_filtered, x='TimeOfDay', y='EnergyConsumption', order=order, ax=ax, palette='Set2')
@@ -284,7 +395,6 @@ with tab2:
             plt.close()
     
     elif viz_type == "Time Series Analysis":
-        # Time series granularity
         granularity = st.selectbox("Select Time Granularity", ["Hour", "Day", "Month"])
         
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -304,7 +414,6 @@ with tab2:
             ax.set_ylabel('Avg Energy Consumption (kWh)')
             ax.set_title('Daily Average Energy Consumption')
             ax.grid(True, alpha=0.3)
-            # Reduce x-ticks for better readability
             step = max(1, len(ts_data) // 20)
             ax.set_xticks(range(0, len(ts_data), step))
             
@@ -319,7 +428,6 @@ with tab2:
         st.pyplot(fig)
         plt.close()
         
-        # Multi-variable time series
         st.write("#### Multi-Variable Time Series")
         vars_to_plot = st.multiselect(
             "Select variables to plot",
@@ -329,10 +437,7 @@ with tab2:
         
         if vars_to_plot:
             fig, ax1 = plt.subplots(figsize=(14, 6))
-            
-            # Sample data for better performance (take every 10th point)
             sample_data = df_filtered.iloc[::10] if len(df_filtered) > 1000 else df_filtered
-            
             color1 = '#667eea'
             color2 = '#764ba2'
             
@@ -354,7 +459,6 @@ with tab2:
             ax1.set_title('Time Series Comparison')
             ax1.grid(True, alpha=0.3)
             
-            # Combine legends
             lines1, labels1 = ax1.get_legend_handles_labels()
             if 'ax2' in locals():
                 lines2, labels2 = ax2.get_legend_handles_labels()
@@ -367,7 +471,6 @@ with tab2:
             plt.close()
     
     elif viz_type == "Correlation Analysis":
-        # Correlation heatmap
         numeric_cols = df_filtered.select_dtypes(include=[np.number]).columns
         corr_matrix = df_filtered[numeric_cols].corr()
         
@@ -382,7 +485,6 @@ with tab2:
         st.pyplot(fig)
         plt.close()
         
-        # Scatter plots for selected features
         st.write("#### Scatter Plot Analysis")
         selected_features = st.multiselect(
             "Select two features for scatter plot",
@@ -402,7 +504,6 @@ with tab2:
                 ax.set_ylabel('Energy Consumption (kWh)')
                 ax.set_title(f'{selected_features[0]} vs Energy Consumption')
                 ax.grid(True, alpha=0.3)
-                # Add legend for weekend
                 legend_elements = [Patch(facecolor='#1f77b4', label='Weekday'),
                                  Patch(facecolor='#ff7f0e', label='Weekend')]
                 ax.legend(handles=legend_elements)
@@ -421,7 +522,7 @@ with tab2:
                 st.pyplot(fig)
                 plt.close()
     
-    else:  # Comparative Analysis
+    else:
         col1, col2 = st.columns(2)
         
         with col1:
@@ -480,17 +581,14 @@ with tab3:
     You can either train a custom model or use the pre-trained model.
     """)
     
-    # Model selection
     model_type = st.selectbox(
         "Select Model Type",
         ["Linear Regression", "Random Forest Regressor"]
     )
     
-    # Prepare data
     df_model = df.copy()
     df_model = df_model.drop('Timestamp', axis=1)
     
-    # Encode categorical variables
     le_dict = {}
     categorical_cols = ['HVACUsage', 'LightingUsage', 'DayOfWeek', 'Holiday', 'TimeOfDay']
     
@@ -502,15 +600,12 @@ with tab3:
     X = df_model.drop('EnergyConsumption', axis=1)
     y = df_model['EnergyConsumption']
     
-    # Train-test split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    # Scale features
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # Train model
     with st.spinner("Training model..."):
         if model_type == "Linear Regression":
             model = LinearRegression()
@@ -520,13 +615,11 @@ with tab3:
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
         
-        # Calculate metrics
         r2 = r2_score(y_test, y_pred)
         mse = mean_squared_error(y_test, y_pred)
         rmse = np.sqrt(mse)
         mae = mean_absolute_error(y_test, y_pred)
     
-    # Display metrics
     st.success("✅ Model Training Complete!")
     
     col1, col2, col3, col4 = st.columns(4)
@@ -539,7 +632,6 @@ with tab3:
     with col4:
         st.metric("MSE", f"{mse:.2f}")
     
-    # Actual vs Predicted plot
     st.write("#### Model Performance: Actual vs Predicted")
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.scatter(y_test, y_pred, alpha=0.5, color='#667eea')
@@ -552,7 +644,6 @@ with tab3:
     st.pyplot(fig)
     plt.close()
     
-    # Feature importance (for Random Forest)
     if model_type == "Random Forest Regressor":
         st.write("#### Feature Importance")
         feature_importance = pd.DataFrame({
@@ -569,16 +660,17 @@ with tab3:
         st.pyplot(fig)
         plt.close()
     
-    # Custom prediction
     st.write("---")
     st.write("#### Make a Custom Prediction")
-    st.markdown("Adjust the parameters below to predict energy consumption:")
     
     col1, col2 = st.columns(2)
     
+    default_temp = current_weather['temperature'] if current_weather else 25.0
+    default_humidity = current_weather['humidity'] if current_weather else 50.0
+    
     with col1:
-        temperature = st.slider("Temperature (°C)", 15.0, 35.0, 25.0, key="temp_slider")
-        humidity = st.slider("Humidity (%)", 20.0, 80.0, 50.0, key="hum_slider")
+        temperature = st.slider("Temperature (°C)", 15.0, 35.0, default_temp, key="temp_slider")
+        humidity = st.slider("Humidity (%)", 20.0, 80.0, default_humidity, key="hum_slider")
         square_footage = st.slider("Square Footage (sq ft)", 1000.0, 2000.0, 1500.0, key="sqft_slider")
         occupancy = st.slider("Occupancy (people)", 0, 10, 5, key="occ_slider")
     
@@ -590,7 +682,6 @@ with tab3:
         day_of_week = st.selectbox("Day of Week", ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'], key="dow_select")
         hour = st.slider("Hour of Day", 0, 23, 12, key="hour_slider")
     
-    # Prepare input for prediction
     if st.button("🔮 Predict Energy Consumption", type="primary"):
         input_dict = {
             'Temperature': temperature,
@@ -611,11 +702,8 @@ with tab3:
             'TimeOfDay': 'Morning' if 6 <= hour < 12 else 'Afternoon' if 12 <= hour < 18 else 'Evening' if 18 <= hour < 24 else 'Night'
         }
         
-        # Encode TimeOfDay
         time_map = {'Night': 0, 'Morning': 1, 'Afternoon': 2, 'Evening': 3}
         input_dict['TimeOfDay'] = time_map[input_dict['TimeOfDay']]
-        
-        # Encode DayOfWeek
         input_dict['DayOfWeek'] = le_dict['DayOfWeek'].transform([input_dict['DayOfWeek']])[0]
         
         input_df = pd.DataFrame([input_dict])
@@ -625,6 +713,9 @@ with tab3:
         
         st.balloons()
         st.success(f"### ⚡ Predicted Energy Consumption: {prediction[0]:.2f} kWh")
+        
+        if current_weather:
+            st.info(f"💡 Current weather in {weather_city}: {current_weather['temperature']:.1f}°C, {current_weather['humidity']}% humidity")
 
 # -----------------------------
 # TAB 4: INSIGHTS
@@ -637,7 +728,6 @@ with tab4:
     with col1:
         st.markdown("#### 🔍 Top Insights")
         
-        # Calculate key insights
         avg_hvac_on = df_filtered[df_filtered['HVACUsage'] == 'On']['EnergyConsumption'].mean()
         avg_hvac_off = df_filtered[df_filtered['HVACUsage'] == 'Off']['EnergyConsumption'].mean()
         
@@ -652,7 +742,6 @@ with tab4:
         st.info(f"💡 **Peak Hour:** Highest consumption occurs at {peak_hour}:00")
         st.info(f"💡 **Best Hour:** Lowest consumption occurs at {low_hour}:00")
         
-        # Correlation with temperature
         temp_corr = df_filtered['Temperature'].corr(df_filtered['EnergyConsumption'])
         st.info(f"💡 **Temperature Correlation:** {temp_corr:.2f} correlation between temperature and energy consumption")
     
@@ -686,7 +775,6 @@ with tab4:
         - Automate based on occupancy
         """)
     
-    # Hourly consumption pattern
     st.markdown("#### 📊 Hourly Consumption Pattern")
     hourly_pattern = df_filtered.groupby('Hour')['EnergyConsumption'].agg(['mean', 'std']).reset_index()
     
@@ -704,6 +792,13 @@ with tab4:
     st.pyplot(fig)
     plt.close()
 
-st.markdown("---")
-st.markdown("### 🎯 Summary")
-st.info("This dashboard provides comprehensive analysis of building energy consumption patterns. Use the filters to explore specific scenarios and leverage the prediction model for forecasting energy needs.")
+# -----------------------------
+# TAB 5: WEATHER INTEGRATION
+# -----------------------------
+with tab5:
+    st.subheader("🌤️ Weather Impact Analysis")
+    
+    if current_weather:
+        st.markdown(f"### Current Weather in {weather_city}")
+        
+        col1, col2, col
